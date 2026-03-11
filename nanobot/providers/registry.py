@@ -70,6 +70,15 @@ class ProviderSpec:
 # ---------------------------------------------------------------------------
 
 PROVIDERS: tuple[ProviderSpec, ...] = (
+    # === Abacus API (API-compatible router gateway) ======
+    ProviderSpec(
+        name="abacus",
+        keywords=("abacus",),
+        env_key="ABACUS_API_KEY",
+        display_name="Abacus",
+        litellm_prefix="",
+        is_direct=True, # We built a custom provider for it
+    ),
     # === Custom (direct OpenAI-compatible endpoint, bypasses LiteLLM) ======
     ProviderSpec(
         name="custom",

@@ -1,9 +1,9 @@
 """Mycelium: RSS feed parsing and extraction using Abacus LLM."""
 
 import os
-import json
 import time
 import asyncio
+import sqlite3
 from pathlib import Path
 from loguru import logger
 import feedparser
@@ -13,26 +13,29 @@ from nanobot.agent.tools.obsidian import ObsidianTool
 
 WORKSPACE_DIR = Path(os.environ.get("WORKSPACE_DIR", "."))
 FEEDS_FILE = WORKSPACE_DIR / "feeds.txt"
-STATE_FILE = WORKSPACE_DIR / ".mycelium_state.json"
+DB_FILE = WORKSPACE_DIR / "mycelium_cache.db"
 ABACUS_API_KEY = os.environ.get("ABACUS_API_KEY", "")
 
-def load_state() -> dict:
-    """Load the state of already processed RSS entries."""
-    if STATE_FILE.exists():
-        try:
-            with open(STATE_FILE, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"Could not load state: {e}")
-    return {"processed_urls": []}
+def setup_db():
+    """Initialize SQLite database for tracking processed URLs."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS processed_urls
+                 (url TEXT PRIMARY KEY, processed_at REAL)''')
+    conn.commit()
+    return conn
 
-def save_state(state: dict):
-    """Save the state."""
-    try:
-        with open(STATE_FILE, 'w') as f:
-            json.dump(state, f)
-    except Exception as e:
-        logger.warning(f"Could not save state: {e}")
+def is_processed(conn: sqlite3.Connection, url: str) -> bool:
+    """Check if the URL exists in the cache."""
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM processed_urls WHERE url=?", (url,))
+    return c.fetchone() is not None
+
+def mark_processed(conn: sqlite3.Connection, url: str):
+    """Mark the URL as processed."""
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO processed_urls (url, processed_at) VALUES (?, ?)", (url, time.time()))
+    conn.commit()
 
 async def process_entry(entry, provider: AbacusProvider, obsidian_tool: ObsidianTool):
     """Evaluate entry and write to Obsidian if it is a signal."""
@@ -86,11 +89,8 @@ async def run():
         logger.error(f"Feeds file not found: {FEEDS_FILE}")
         return
 
+    db_conn = setup_db()
     feeds = [url.strip() for url in FEEDS_FILE.read_text().splitlines() if url.strip() and not url.startswith("#")]
-    state = load_state()
-    processed_urls = set(state.get("processed_urls", []))
-    
-    newly_processed = []
 
     for feed_url in feeds:
         logger.info(f"Parsing feed: {feed_url}")
@@ -98,18 +98,15 @@ async def run():
             parsed = feedparser.parse(feed_url)
             for entry in parsed.entries[:10]: # Process max 10 entries per feed to avoid LLM spam
                 link = entry.get("link")
-                if link and link not in processed_urls:
+                if link and not is_processed(db_conn, link):
                     await process_entry(entry, provider, obsidian_tool)
-                    newly_processed.append(link)
-                    processed_urls.add(link)
+                    mark_processed(db_conn, link)
                     # Simple rate limit for LLM provider
                     await asyncio.sleep(2)
         except Exception as e:
             logger.error(f"Error parsing {feed_url}: {e}")
 
-    # Keep only the last 1000 URLs to prevent infinite file size growth
-    state["processed_urls"] = list(processed_urls)[-1000:]
-    save_state(state)
+    db_conn.close()
     logger.info("Mycelium finished successfully.")
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 import os
 import json
 import time
+import re
 from pathlib import Path
 from loguru import logger
 
@@ -116,10 +117,6 @@ def run():
     for filepath in new_or_modified_files:
         try:
             content = filepath.read_text(encoding='utf-8')
-            
-            # Avoid re-linking if we already appended references
-            if "## Referências Automáticas (Gardener)" in content:
-                continue
                 
             # Use the first 500 chars as query
             query_text = content[:500]
@@ -147,7 +144,14 @@ def run():
                 refs = "\n".join([f"- [[{note}]]" for note in linked_notes])
                 append_text = f"\n\n## Referências Automáticas (Gardener)\n{refs}\n"
                 
-                filepath.write_text(content + append_text, encoding='utf-8')
+                # Regex to search for the block and replace it, or append if it doesn't exist
+                pattern = r'\n+## Referências Automáticas \(Gardener\)[\s\S]*?(?=\n## |\Z)'
+                if re.search(pattern, content):
+                    new_content = re.sub(pattern, append_text, content)
+                else:
+                    new_content = content + append_text
+                
+                filepath.write_text(new_content, encoding='utf-8')
                 logger.info(f"Auto-linked {filepath.name} to: {', '.join(linked_notes)}")
                 
         except Exception as e:

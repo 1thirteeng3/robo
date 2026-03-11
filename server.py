@@ -8,8 +8,8 @@ from loguru import logger
 
 from nanobot.providers.abacus_provider import AbacusProvider
 from nanobot.session.manager import SessionManager
-from nanobot.agent.loop import AgentLoop
-from nanobot.bus.queue import MessageBus
+from nanobot.agent.context import ContextBuilder
+from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.obsidian import ObsidianTool
 from nanobot.agent.tools.black_ops import BlackOpsScrapeTool
 
@@ -42,7 +42,7 @@ async def _send_telegram_message(chat_id: int, text: str):
             logger.error(f"Failed to send Telegram message: {e}")
 
 async def process_telegram_update(update_data: dict):
-    """Processes the message using the ephemeral AgentLoop and saves history."""
+    """Processes the message using ContextBuilder and Provider directly to avoid AgentLoop thread blocks."""
     try:
         message = update_data.get("message", {})
         chat = message.get("chat", {})
@@ -52,35 +52,65 @@ async def process_telegram_update(update_data: dict):
         if not text:
             return
 
-        # Initialize the heavy parts ephemerally
-        bus = MessageBus()
-        session_manager = SessionManager(WORKSPACE_DIR)
-        
-        loop = AgentLoop(
-            bus=bus,
-            provider=provider,
-            workspace=WORKSPACE_DIR,
-            session_manager=session_manager
-        )
-        loop.tools.register(ObsidianTool(WORKSPACE_DIR))
-        loop.tools.register(BlackOpsScrapeTool())
-
         session_key = f"telegram:{chat_id}"
         logger.info(f"Processing message '{text}' for session '{session_key}'")
 
-        # Process the message and get response
-        response_text = await loop.process_direct(
-            content=text,
-            session_key=session_key,
+        # 1. Initialize tools registry
+        registry = ToolRegistry()
+        registry.register(ObsidianTool(WORKSPACE_DIR))
+        registry.register(BlackOpsScrapeTool())
+
+        # 2. Setup Session and Memory natively
+        session_manager = SessionManager(WORKSPACE_DIR)
+        session = session_manager.get_session(session_key)
+        
+        # Add user message to session
+        session.add_message({"role": "user", "content": text})
+
+        # 3. Build context prompt
+        context_builder = ContextBuilder(WORKSPACE_DIR)
+        messages = context_builder.build_messages(
+            history=session.get_history(),
+            current_message=text,
             channel="telegram",
             chat_id=str(chat_id)
         )
 
-        if response_text:
-            await _send_telegram_message(chat_id, response_text)
+        tool_schemas = registry.get_definitions()
+        
+        # 4. First Generation Call
+        response = await provider.generate_response(
+            messages=messages,
+            tools=tool_schemas if tool_schemas else None
+        )
+
+        # 5. Handle Tool Execution strictly synchronously for the webhook thread
+        while response.tool_calls:
+            for tool_call in response.tool_calls:
+                fn_name = tool_call.function.name
+                fn_args = tool_call.function.parsed_arguments
+
+                logger.info(f"Executing tool {fn_name} with args {fn_args}")
+                tool_result = await registry.execute(fn_name, fn_args)
+                
+                messages = context_builder.add_tool_result(
+                    messages, tool_call.id, fn_name, tool_result
+                )
+
+            # Re-generate with tool results
+            response = await provider.generate_response(
+                messages=messages,
+                tools=tool_schemas if tool_schemas else None
+            )
+
+        # 6. Save final response and history
+        if response.content:
+            session.add_message({"role": "assistant", "content": response.content})
+            session_manager.save_session(session)
+            await _send_telegram_message(chat_id, response.content)
 
     except Exception as e:
-        logger.exception("Error processing update within AgentLoop")
+        logger.exception("Error processing update natively")
 
 @app.post("/telegram-webhook")
 async def telegram_webhook(
