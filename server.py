@@ -40,6 +40,8 @@ async def _send_telegram_message(chat_id: int, text: str):
         except Exception as e:
             logger.error(f"Failed to send Telegram message: {e}")
 
+import json
+
 async def process_telegram_update(update_data: dict):
     """Processes the message using ContextBuilder and Provider directly to avoid AgentLoop thread blocks."""
     try:
@@ -64,13 +66,10 @@ async def process_telegram_update(update_data: dict):
             registry.register(ObsidianTool())
             registry.register(BlackOpsScrapeTool())
     
-            # 2. Setup Session and Memory natively
+            # 2. Setup Session and Memory natively (SEM adicionar o user message ainda)
             session_manager = SessionManager(WORKSPACE_DIR)
             session = session_manager.get_session(session_key)
             
-            # Add user message to session
-            session.add_message({"role": "user", "content": text})
-    
             # 3. Build context prompt
             context_builder = ContextBuilder(WORKSPACE_DIR)
             messages = context_builder.build_messages(
@@ -88,25 +87,24 @@ async def process_telegram_update(update_data: dict):
                 tools=tool_schemas if tool_schemas else None
             )
             
-            # We must maintain intermediate state for the session manager
             intermediate_messages = []
     
-            # 5. Handle Tool Execution strictly synchronously for the webhook thread
+            # 5. Handle Tool Execution strictly synchronously
             max_tool_iterations = 5
             iterations = 0
             
             while response.tool_calls and iterations < max_tool_iterations:
                 iterations += 1
                 
-                # Add the assistant's tool call intent to intermediate history
-                tool_call_dicts = [
-                    {
+                # Formata os argumentos garantindo JSON válido
+                tool_call_dicts = []
+                for tc in response.tool_calls:
+                    args_str = tc.arguments if isinstance(tc.arguments, str) else json.dumps(tc.arguments)
+                    tool_call_dicts.append({
                         "id": tc.id,
                         "type": "function",
-                        "function": {"name": tc.name, "arguments": str(tc.arguments)}
-                    }
-                    for tc in response.tool_calls
-                ]
+                        "function": {"name": tc.name, "arguments": args_str}
+                    })
                 
                 tool_intent_msg = {
                     "role": "assistant", 
@@ -128,7 +126,6 @@ async def process_telegram_update(update_data: dict):
                     logger.info(f"Executing tool {fn_name} with args {fn_args}")
                     tool_result = await registry.execute(fn_name, fn_args)
                     
-                    # Add tool result to intermediate history
                     intermediate_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -147,17 +144,22 @@ async def process_telegram_update(update_data: dict):
                 )
                 
             if iterations >= max_tool_iterations:
-                logger.warning("Agent exceeded maximum tool iterations. Force-stopping.")
-                response.content = "Desculpe, atingi o limite de processamento interno tentando executar muitas ferramentas seguidas."
+                logger.warning("Agent exceeded maximum tool iterations.")
+                response.content = "Desculpe, atingi o limite interno executando ferramentas."
     
-            # 6. Save final response and history
+            # 6. Save ALL history unconditionally
+            session.add_message({"role": "user", "content": text})
+            for m in intermediate_messages:
+                session.add_message(m)
+            
             if response.content:
-                # Add all intermediate tool steps to the global session history
-                for m in intermediate_messages:
-                    session.add_message(m)
-                
                 session.add_message({"role": "assistant", "content": response.content})
-                session_manager.save_session(session)
+                
+            # Persiste o estado no disco garantindo que não há amnésia
+            session_manager.save_session(session)
+    
+            # 7. Responde ao usuário se houver texto
+            if response.content:
                 await _send_telegram_message(chat_id, response.content)
 
     except Exception as e:
