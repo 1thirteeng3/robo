@@ -59,7 +59,7 @@ Instruções:
 """
 
     messages = [{"role": "user", "content": prompt}]
-    response = await provider.chat(messages=messages, max_tokens=1000, temperature=0.2)
+    response = await provider.chat_with_retry(messages=messages, max_tokens=1000, temperature=0.2)
     
     result = response.content.strip()
     if result == "NULL" or not result:
@@ -83,7 +83,7 @@ async def run():
         logger.warning("ABACUS_API_KEY is not set. The LLM triage will rely on the default provider configuration which may fail without a key.")
         
     provider = AbacusProvider(api_key=ABACUS_API_KEY)
-    obsidian_tool = ObsidianTool(workspace_dir=WORKSPACE_DIR) if hasattr(ObsidianTool, "workspace_dir") else ObsidianTool()
+    obsidian_tool = ObsidianTool()
 
     if not FEEDS_FILE.exists():
         logger.error(f"Feeds file not found: {FEEDS_FILE}")

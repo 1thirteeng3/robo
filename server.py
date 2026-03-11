@@ -57,7 +57,7 @@ async def process_telegram_update(update_data: dict):
 
         # 1. Initialize tools registry
         registry = ToolRegistry()
-        registry.register(ObsidianTool(WORKSPACE_DIR))
+        registry.register(ObsidianTool())
         registry.register(BlackOpsScrapeTool())
 
         # 2. Setup Session and Memory natively
@@ -79,7 +79,7 @@ async def process_telegram_update(update_data: dict):
         tool_schemas = registry.get_definitions()
         
         # 4. First Generation Call
-        response = await provider.generate_response(
+        response = await provider.chat_with_retry(
             messages=messages,
             tools=tool_schemas if tool_schemas else None
         )
@@ -98,7 +98,7 @@ async def process_telegram_update(update_data: dict):
                 )
 
             # Re-generate with tool results
-            response = await provider.generate_response(
+            response = await provider.chat_with_retry(
                 messages=messages,
                 tools=tool_schemas if tool_schemas else None
             )

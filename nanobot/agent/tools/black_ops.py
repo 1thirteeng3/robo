@@ -28,16 +28,10 @@ class BlackOpsScrapeTool(Tool):
         }
 
     async def execute(self, url: str, **kwargs: Any) -> str:
-        # Note: The Tool base interface uses async def execute, but we can safely block the thread
-        # here because this tool will be called from a thread pool executor or it's an I/O operation 
-        # that executes safely in the webhook route instance. Wait, the framework `async def execute` 
-        # means we should probably run the blocking sync_playwright in a thread, OR we just use synchronous 
-        # code here blocking the current task. Given the instruction: "refatore para playwright.sync_api ... a execução bloqueie a thread local", 
-        # we will do exactly that.
-        
+        import asyncio
         logger.info(f"Black Ops engaged: navigating to {url}")
         
-        try:
+        def _scrape_sync() -> str:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
                 page = browser.new_page(
@@ -53,17 +47,21 @@ class BlackOpsScrapeTool(Tool):
                 # Extract clean innerText
                 inner_text = page.evaluate("() => document.body.innerText")
                 browser.close()
-                
-                logger.info("Black Ops extraction complete.")
-                
-                if not inner_text:
-                    return f"Successfully reached {url} but extracted content was empty."
-                
-                # Truncate if ridiculously large to fit in Context limit
-                max_len = 60000 
-                if len(inner_text) > max_len:
-                    return inner_text[:max_len] + f"\n\n[TRUNCATED: original was {len(inner_text)} chars]"
                 return inner_text
+
+        try:
+            # Delegate blocking execution to a secondary thread to avoid stalling the FastApi event loop
+            inner_text = await asyncio.to_thread(_scrape_sync)
+            logger.info("Black Ops extraction complete.")
+            
+            if not inner_text:
+                return f"Successfully reached {url} but extracted content was empty."
+            
+            # Truncate if ridiculously large to fit in Context limit
+            max_len = 60000 
+            if len(inner_text) > max_len:
+                return inner_text[:max_len] + f"\n\n[TRUNCATED: original was {len(inner_text)} chars]"
+            return inner_text
 
         except Exception as e:
             logger.error(f"Black Ops failure on {url}: {e}")
