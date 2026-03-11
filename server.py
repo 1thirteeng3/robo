@@ -1,3 +1,5 @@
+import os
+import json
 import asyncio
 import httpx
 from typing import Annotated
@@ -6,12 +8,12 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
 from loguru import logger
 
-from nanobot.providers.abacus_provider import AbacusProvider
-from nanobot.session.manager import SessionManager
-from nanobot.agent.context import ContextBuilder
-from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.agent.tools.obsidian import ObsidianTool
-from nanobot.agent.tools.black_ops import BlackOpsScrapeTool
+from pandaemon.providers.abacus_provider import AbacusProvider
+from pandaemon.session.manager import SessionManager
+from pandaemon.agent.context import ContextBuilder
+from pandaemon.agent.tools.registry import ToolRegistry
+from pandaemon.agent.tools.obsidian import ObsidianTool
+from pandaemon.agent.tools.black_ops import BlackOpsScrapeTool
 
 app = FastAPI(title="Pandaemon Webhook Gateway")
 
@@ -39,8 +41,6 @@ async def _send_telegram_message(chat_id: int, text: str):
             r.raise_for_status()
         except Exception as e:
             logger.error(f"Failed to send Telegram message: {e}")
-
-import json
 
 async def process_telegram_update(update_data: dict):
     """Processes the message using ContextBuilder and Provider directly to avoid AgentLoop thread blocks."""

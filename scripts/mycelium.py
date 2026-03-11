@@ -8,8 +8,8 @@ from pathlib import Path
 from loguru import logger
 import feedparser
 
-from nanobot.providers.abacus_provider import AbacusProvider
-from nanobot.agent.tools.obsidian import ObsidianTool
+from pandaemon.providers.abacus_provider import AbacusProvider
+from pandaemon.agent.tools.obsidian import ObsidianTool
 
 WORKSPACE_DIR = Path(os.environ.get("WORKSPACE_DIR", "."))
 FEEDS_FILE = WORKSPACE_DIR / "feeds.txt"

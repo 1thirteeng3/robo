@@ -2,10 +2,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nanobot.agent.loop import AgentLoop
-import nanobot.agent.memory as memory_module
-from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import LLMResponse
+from pandaemon.agent.loop import AgentLoop
+import pandaemon.agent.memory as memory_module
+from pandaemon.bus.queue import MessageBus
+from pandaemon.providers.base import LLMResponse
 
 
 def _make_loop(tmp_path, *, estimated_tokens: int, context_window_tokens: int) -> AgentLoop:
