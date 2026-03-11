@@ -1,4 +1,4 @@
-import os
+import asyncio
 import httpx
 from typing import Annotated
 from pathlib import Path
@@ -24,8 +24,7 @@ ALLOWED_CHAT_ID = os.environ.get("ALLOWED_CHAT_ID", "")
 
 # Global instances that are lightweight and can persist 
 provider = AbacusProvider(api_key=ABACUS_API_KEY)
-# We instantiate session manager per request as per instructions or globally since it's lightweight
-# session_manager = SessionManager(WORKSPACE_DIR)
+chat_locks: dict[int, asyncio.Lock] = {}
 
 async def _send_telegram_message(chat_id: int, text: str):
     """Send text message back to Telegram"""
@@ -49,65 +48,117 @@ async def process_telegram_update(update_data: dict):
         chat_id = chat.get("id")
         text = message.get("text", "").strip()
 
-        if not text:
+        if not text or not chat_id:
             return
-
-        session_key = f"telegram:{chat_id}"
-        logger.info(f"Processing message '{text}' for session '{session_key}'")
-
-        # 1. Initialize tools registry
-        registry = ToolRegistry()
-        registry.register(ObsidianTool())
-        registry.register(BlackOpsScrapeTool())
-
-        # 2. Setup Session and Memory natively
-        session_manager = SessionManager(WORKSPACE_DIR)
-        session = session_manager.get_session(session_key)
-        
-        # Add user message to session
-        session.add_message({"role": "user", "content": text})
-
-        # 3. Build context prompt
-        context_builder = ContextBuilder(WORKSPACE_DIR)
-        messages = context_builder.build_messages(
-            history=session.get_history(),
-            current_message=text,
-            channel="telegram",
-            chat_id=str(chat_id)
-        )
-
-        tool_schemas = registry.get_definitions()
-        
-        # 4. First Generation Call
-        response = await provider.chat_with_retry(
-            messages=messages,
-            tools=tool_schemas if tool_schemas else None
-        )
-
-        # 5. Handle Tool Execution strictly synchronously for the webhook thread
-        while response.tool_calls:
-            for tool_call in response.tool_calls:
-                fn_name = tool_call.function.name
-                fn_args = tool_call.function.parsed_arguments
-
-                logger.info(f"Executing tool {fn_name} with args {fn_args}")
-                tool_result = await registry.execute(fn_name, fn_args)
-                
-                messages = context_builder.add_tool_result(
-                    messages, tool_call.id, fn_name, tool_result
-                )
-
-            # Re-generate with tool results
+            
+        # Get or create a lock for this specific chat_id
+        if chat_id not in chat_locks:
+            chat_locks[chat_id] = asyncio.Lock()
+            
+        async with chat_locks[chat_id]:
+            session_key = f"telegram:{chat_id}"
+            logger.info(f"Processing message '{text}' for session '{session_key}'")
+    
+            # 1. Initialize tools registry
+            registry = ToolRegistry()
+            registry.register(ObsidianTool())
+            registry.register(BlackOpsScrapeTool())
+    
+            # 2. Setup Session and Memory natively
+            session_manager = SessionManager(WORKSPACE_DIR)
+            session = session_manager.get_session(session_key)
+            
+            # Add user message to session
+            session.add_message({"role": "user", "content": text})
+    
+            # 3. Build context prompt
+            context_builder = ContextBuilder(WORKSPACE_DIR)
+            messages = context_builder.build_messages(
+                history=session.get_history(),
+                current_message=text,
+                channel="telegram",
+                chat_id=str(chat_id)
+            )
+    
+            tool_schemas = registry.get_definitions()
+            
+            # 4. First Generation Call
             response = await provider.chat_with_retry(
                 messages=messages,
                 tools=tool_schemas if tool_schemas else None
             )
-
-        # 6. Save final response and history
-        if response.content:
-            session.add_message({"role": "assistant", "content": response.content})
-            session_manager.save_session(session)
-            await _send_telegram_message(chat_id, response.content)
+            
+            # We must maintain intermediate state for the session manager
+            intermediate_messages = []
+    
+            # 5. Handle Tool Execution strictly synchronously for the webhook thread
+            max_tool_iterations = 5
+            iterations = 0
+            
+            while response.tool_calls and iterations < max_tool_iterations:
+                iterations += 1
+                
+                # Add the assistant's tool call intent to intermediate history
+                tool_call_dicts = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments": str(tc.arguments)}
+                    }
+                    for tc in response.tool_calls
+                ]
+                
+                tool_intent_msg = {
+                    "role": "assistant", 
+                    "content": response.content, 
+                    "tool_calls": tool_call_dicts
+                }
+                intermediate_messages.append(tool_intent_msg)
+                
+                messages = context_builder.add_assistant_message(
+                    messages, 
+                    content=response.content, 
+                    tool_calls=tool_call_dicts
+                )
+                
+                for tool_call in response.tool_calls:
+                    fn_name = tool_call.name
+                    fn_args = tool_call.arguments
+    
+                    logger.info(f"Executing tool {fn_name} with args {fn_args}")
+                    tool_result = await registry.execute(fn_name, fn_args)
+                    
+                    # Add tool result to intermediate history
+                    intermediate_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": fn_name,
+                        "content": tool_result
+                    })
+                    
+                    messages = context_builder.add_tool_result(
+                        messages, tool_call.id, fn_name, tool_result
+                    )
+    
+                # Re-generate with tool results
+                response = await provider.chat_with_retry(
+                    messages=messages,
+                    tools=tool_schemas if tool_schemas else None
+                )
+                
+            if iterations >= max_tool_iterations:
+                logger.warning("Agent exceeded maximum tool iterations. Force-stopping.")
+                response.content = "Desculpe, atingi o limite de processamento interno tentando executar muitas ferramentas seguidas."
+    
+            # 6. Save final response and history
+            if response.content:
+                # Add all intermediate tool steps to the global session history
+                for m in intermediate_messages:
+                    session.add_message(m)
+                
+                session.add_message({"role": "assistant", "content": response.content})
+                session_manager.save_session(session)
+                await _send_telegram_message(chat_id, response.content)
 
     except Exception as e:
         logger.exception("Error processing update natively")

@@ -64,6 +64,8 @@ class ObsidianTool(Tool):
         return filename
 
     async def execute(self, filename: str, content: str, **kwargs: Any) -> str:
+        import aiofiles
+        
         try:
             clean_name = self._sanitize_filename(filename)
             file_path = self._vault_dir / clean_name
@@ -71,7 +73,8 @@ class ObsidianTool(Tool):
             # Ensure the directory exists (in case the base directory wasn't ready)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             
-            file_path.write_text(content, encoding="utf-8")
+            async with aiofiles.open(file_path, 'w', encoding="utf-8") as f:
+                await f.write(content)
             
             logger.info(f"ObsidianTool: Wrote to {file_path}")
             return f"Successfully wrote note '{clean_name}' to Obsidian Vault at {self._vault_dir}"
